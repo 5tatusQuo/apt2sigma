@@ -1,0 +1,84 @@
+mappings:
+  - match:
+      product: windows
+      category: process_creation
+    sentinel_tables:
+      - DeviceProcessEvents
+
+  - match:
+      product: windows
+      category: registry_event
+    sentinel_tables:
+      - DeviceRegistryEvents
+
+  - match:
+      product: windows
+      category: image_load
+    sentinel_tables:
+      - DeviceImageLoadEvents
+
+  - match:
+      product: windows
+      category: file_event
+    sentinel_tables:
+      - DeviceFileEvents
+
+  - match:
+      product: windows
+      category: network_connection
+    sentinel_tables:
+      - DeviceNetworkEvents
+
+  - match:
+      product: windows
+      category: file_delete
+    sentinel_tables:
+      - DeviceFileEvents
+
+  - match:
+      product: windows
+      category: file_change
+    sentinel_tables:
+      - DeviceFileEvents
+
+  - match:
+      product: windows
+      service: dns_query
+    sentinel_tables:
+      - AZFWDnsQuery
+
+  - match:
+      product: azure
+      service: signinlogs
+    sentinel_tables:
+      - SigninLogs
+
+  - match:
+      product: azure
+      service: activitylogs
+    sentinel_tables:
+      - AzureActivity
+
+  - match:
+      product: azure
+      service: auditlogs
+    sentinel_tables:
+      - AuditLogs
+
+  - match:
+      product: azure
+      service: pim
+    sentinel_tables:
+      - AuditLogs
+
+  - match:
+      product: azure
+      service: riskdetection
+    sentinel_tables:
+      - AADUserRiskEvents
+
+  - match:
+      product: m365
+      service: audit
+    sentinel_tables:
+      - OfficeActivity

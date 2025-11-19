@@ -1,0 +1,19 @@
+# Virtual environment
+bin/
+lib/
+include/
+pyvenv.cfg
+*.pyc
+__pycache__/
+
+# Claude Code
+.claude/
+
+# Large files - Sigma repository (clone separately)
+sigma/
+
+# Enterprise ATT&CK data (large, download separately)
+enterprise-attack.json
+
+# Generated output (regenerate as needed)
+rules.txt
