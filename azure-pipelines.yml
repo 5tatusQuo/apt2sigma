@@ -1,0 +1,215 @@
+# azure-pipelines.yml
+
+trigger: none
+pr: none
+
+variables:
+  baseBranch: main
+  branchNamePrefix: sigma-rules-update
+  pythonVersion: '3.10'
+
+  convertedRulesDir: 'converted_rules'
+  armOutputDir: 'Detections/Test'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+- stage: BuildAndPR
+  displayName: 'APT2Sigma → Convert → PR'
+  jobs:
+  - job: GenerateAndPR
+    displayName: 'Generate Sigma-based detection rules and open PR'
+    steps:
+    - checkout: self
+      persistCredentials: true
+
+    - task: UsePythonVersion@0
+      displayName: 'Use Python $(pythonVersion)'
+      inputs:
+        versionSpec: '$(pythonVersion)'
+        addToPath: true
+
+    - bash: |
+        set -euxo pipefail
+        python --version
+        python -m pip install --upgrade pip wheel
+        python -m pip install "PyYAML>=6.0" "pySigma>=0.11.0" "pySigma-backend-microsoft365defender>=0.3.0" "attackcti>=0.3.0"
+      displayName: "Install Python dependencies"
+
+    - bash: |
+        set -euxo pipefail
+        echo "=== Cloning Sigma repository ==="
+        if [ ! -d "sigma" ]; then
+          git clone https://github.com/SigmaHQ/sigma sigma
+          echo "Sigma repository cloned"
+        else
+          echo "Sigma repository already exists"
+        fi
+      displayName: "Clone Sigma repository"
+
+    - bash: |
+        set -euxo pipefail
+        echo "=== Downloading MITRE ATT&CK data ==="
+        if [ ! -f "enterprise-attack.json" ]; then
+          curl -L -o enterprise-attack.json https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json
+          echo "Downloaded enterprise-attack.json"
+        else
+          echo "enterprise-attack.json already exists"
+        fi
+      displayName: "Download MITRE ATT&CK data"
+
+    - bash: |
+        set -euxo pipefail
+        echo "=== Running apt2sigma.py ==="
+        python apt2sigma.py
+        echo "APT2Sigma analysis complete"
+      displayName: "Run APT2Sigma analysis"
+
+    - bash: |
+        set -euxo pipefail
+        echo "=== Running emerging_threats.py ==="
+        python emerging_threats.py
+        echo "Emerging threats analysis complete"
+      displayName: "Run emerging threats analysis"
+
+    - bash: |
+        set -euxo pipefail
+        echo "=== Converting Sigma rules to analytic YAML ==="
+        if [ ! -f "rules.txt" ]; then
+          echo "ERROR: rules.txt not found"
+          exit 1
+        fi
+
+        # Count unique rule IDs
+        rule_count=$(sort -u rules.txt | wc -l)
+        echo "Converting $rule_count unique rules"
+
+        python convert.py rules.txt -o "$(convertedRulesDir)"
+
+        echo "Converted rules written to $(convertedRulesDir)"
+        test -d "$(convertedRulesDir)" && echo "Verified: $(convertedRulesDir) exists."
+      displayName: "Convert Sigma rules to analytic YAML"
+
+    - bash: |
+        set -euo pipefail
+
+        find_script () {
+          pat="$1"
+          hit="$(git ls-files | grep -E "$pat" | head -n1 || true)"
+          if [ -z "$hit" ]; then
+            echo "ERROR: Could not find script matching pattern: $pat"
+            exit 12
+          fi
+          echo "$hit"
+        }
+
+        ARM_SCRIPT="$(find_script '^Detections/convert_analytics_rule_from_yaml_to_arm\.py$|^.*Detections.*/convert_analytics_rule_from_yaml_to_arm\.py$|^.*convert_analytics_rule_from_yaml_to_arm\.py$')"
+
+        echo "ARM_SCRIPT=$ARM_SCRIPT" | tee -a $(Pipeline.Workspace)/script_paths.env
+        echo "Resolved ARM_SCRIPT=$ARM_SCRIPT"
+      displayName: "Resolve ARM conversion script location"
+
+    - bash: |
+        set -euo pipefail
+        source "$(Pipeline.Workspace)/script_paths.env"
+
+        echo "=== Converting YAML rules to ARM templates ==="
+        python "$ARM_SCRIPT" "$(convertedRulesDir)"
+
+        echo "ARM templates expected in $(armOutputDir)"
+        test -d "$(armOutputDir)" && echo "Verified: $(armOutputDir) exists." || echo "Note: $(armOutputDir) not found yet; your script may create it later."
+      displayName: "Convert YAML to ARM templates"
+
+    - bash: |
+        set -euo pipefail
+
+        echo "=== Git identity ==="
+        git config user.email "builds@azuredevops"
+        git config user.name "Azure Pipelines"
+
+        echo "=== Detect changes (including untracked) ==="
+        git add -A
+        if git diff --cached --quiet; then
+          echo "No changes generated. Skipping branch and PR creation."
+          exit 0
+        fi
+
+        branchName="$(branchNamePrefix)/$(Build.BuildId)"
+        echo "=== Creating branch from current HEAD: $branchName ==="
+        git checkout -b "$branchName"
+
+        echo "=== Commit staged changes ==="
+        git add -A
+        git commit -m "Automated Sigma detection rule update (Build $(Build.BuildId))"
+
+        echo "=== Push branch (force if it exists) ==="
+        git push -u -f origin "$branchName"
+
+        echo "=== Create Pull Request via REST API ==="
+        # Use project ID to avoid URL encoding issues with spaces in project names
+        repoId="$(Build.Repository.ID)"
+        orgUrl="$(System.CollectionUri)"     # e.g. https://dev.azure.com/UBHCloudManagement/
+        projectId="$(System.TeamProjectId)"  # GUID
+        apiUrl="${orgUrl}${projectId}/_apis/git/repositories/${repoId}/pullRequests?api-version=7.1-preview.1"
+
+        # Count rules
+        rule_count=$(sort -u rules.txt 2>/dev/null | wc -l || echo "unknown")
+        converted_count=$(find "$(convertedRulesDir)" -name "*.yml" 2>/dev/null | wc -l || echo "0")
+        arm_count=$(find "$(armOutputDir)" -name "*.json" 2>/dev/null | wc -l || echo "0")
+
+        prTitle="Automated Sigma detection rule update (Build $(Build.BuildId))"
+        prDescription="This PR was created by Azure Pipelines.
+
+        Steps executed:
+        - Analyzed APT threat actors (APT29, APT28, Lazarus, APT41, FIN7)
+        - Analyzed emerging threat rules
+        - Selected $rule_count unique Sigma rules based on available log sources
+        - Converted to analytic YAML format (KQL embedded) → $(convertedRulesDir)
+        - Converted to ARM templates → $(armOutputDir)
+        - Generated $converted_count YAML files and $arm_count ARM templates
+
+        Rules filtered by:
+        - Available log sources (Microsoft Defender for Endpoint, Azure, M365)
+        - Excluded CVE-specific rules (handled by Microsoft Defender XDR)
+        - Excluded malware-specific rules (handled by Microsoft Defender XDR)
+        "
+
+        # Build JSON safely
+        payload=$(jq -n \
+          --arg src "refs/heads/$branchName" \
+          --arg tgt "refs/heads/$(baseBranch)" \
+          --arg title "$prTitle" \
+          --arg desc "$prDescription" \
+          '{sourceRefName:$src, targetRefName:$tgt, title:$title, description:$desc}')
+
+        # Call API; capture body and HTTP code; only jq-parse if JSON + success
+        tmp_body="$(mktemp)"
+        http_code=$(curl -sS -o "$tmp_body" -w "%{http_code}" \
+          -X POST \
+          -H "Content-Type: application/json" \
+          -H "Authorization: Bearer $SYSTEM_ACCESSTOKEN" \
+          --data-binary "$payload" \
+          "$apiUrl")
+
+        echo "HTTP $http_code from PR API"
+        content_type="$(file -b --mime-type "$tmp_body" || true)"
+        echo "Response mime-type: $content_type"
+
+        if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+          # best-effort JSON parse
+          if jq -e . >/dev/null 2>&1 < "$tmp_body"; then
+            echo "PR created:"
+            jq '{id, status, title, createdBy: .createdBy.displayName, url: .url}' < "$tmp_body"
+          else
+            echo "PR created, but response was not JSON:"
+            cat "$tmp_body"
+          fi
+        else
+          echo "Failed to create PR. Full response below:"
+          cat "$tmp_body"
+          exit 1
+        fi
+      env:
+        SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+      displayName: "Create branch, push, and open PR"

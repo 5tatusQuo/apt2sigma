@@ -17,3 +17,8 @@ enterprise-attack.json
 
 # Generated output (regenerate as needed)
 rules.txt
+converted_rules/
+*.log
+
+# Backup files
+*.old
